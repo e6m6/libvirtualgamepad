@@ -843,6 +843,51 @@ int main() {
     check(feedback.right_trigger.mode == 0, "ds5 unenabled trigger stays off");
     check((feedback.valid & ps_output_triggers_valid) != 0, "ds5 triggers marked valid");
 
+    // Trigger feedback a physical pad reports for libScePad's programs.
+    {
+      ds5_state trigger_state {};
+      trigger_state.reset();
+      playstation_output_feedback programs {};
+      programs.valid = ps_output_triggers_valid;
+      programs.right_trigger.mode = 0x25;  // Weapon, zones 2..6.
+      programs.right_trigger.parameters[0] = static_cast<std::uint8_t>((1u << 2) | (1u << 6));
+      programs.left_trigger.mode = 0x21;  // Feedback from zone 4 on.
+      programs.left_trigger.parameters[0] = 0xF0;
+      programs.left_trigger.parameters[1] = 0x03;
+      apply_ds5_trigger_programs(programs, &trigger_state);
+
+      input_state_request pull {};
+      pull.header.size = sizeof(pull);
+      pull.header.version = k_protocol_version;
+      const auto at = [&](const std::uint8_t right, const std::uint8_t left) {
+        pull.right_trigger = right;
+        pull.left_trigger = left;
+        return encode_ds5_input(pull, &trigger_state);
+      };
+
+      ds5_input_report r = at(0, 0);
+      check(r.trigger_effects == 0x12, "ds5 reports weapon right, feedback left");
+      check((r.right_trigger_feedback >> 4) == 0, "ds5 weapon ready at rest");
+      check((r.left_trigger_feedback >> 4) == 0, "ds5 feedback unloaded at rest");
+      r = at(100, 200);
+      check((r.right_trigger_feedback >> 4) == 1, "ds5 weapon resisting between zones");
+      check((r.right_trigger_feedback & 0x0F) == 3, "ds5 weapon reports its zone");
+      check((r.left_trigger_feedback >> 4) == 1, "ds5 feedback loaded in an active zone");
+      r = at(255, 0);
+      check((r.right_trigger_feedback >> 4) == 2, "ds5 weapon fires past its end zone");
+      r = at(150, 0);
+      check((r.right_trigger_feedback >> 4) == 2, "ds5 weapon stays fired while held");
+      r = at(20, 0);
+      check((r.right_trigger_feedback >> 4) == 0, "ds5 weapon rearms once released");
+
+      programs.right_trigger = {};
+      programs.right_trigger.mode = 0x05;  // Off.
+      apply_ds5_trigger_programs(programs, &trigger_state);
+      r = at(255, 0);
+      check(r.right_trigger_feedback == 0x09 && (r.trigger_effects & 0x0F) == 0,
+            "ds5 trigger without a program reports no effect");
+    }
+
     std::uint8_t buffer[80] {};
     check(fill_ds5_feature(k_ds5_feature_calibration_id, buffer, sizeof(buffer)) == 41,
           "ds5 calibration feature is 41 bytes");

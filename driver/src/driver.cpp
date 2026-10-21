@@ -1138,6 +1138,9 @@ void evt_vhf_write_report(
       status = STATUS_INVALID_PARAMETER;
     } else {
       slot->playstation_feedback = feedback;
+      if (slot->selected_profile != lvg::profile::dualshock_4) {
+        apply_ds5_trigger_programs(feedback, &slot->ds5);
+      }
       slot->feedback = encode_playstation_feedback(slot->controller_id, feedback);
       slot->feedback_pending = true;  // Coalesce to the current actuator state.
       status = STATUS_SUCCESS;

@@ -71,6 +71,79 @@ void pack_touch_point(ds5_touch_point *const point,
   return static_cast<std::uint16_t>((static_cast<std::uint32_t>(value) * (k_ds5_touch_height - 1)) / 65535u);
 }
 
+// The documented effect programs. Only these report a status on hardware; the
+// older "simple" modes leave both nibbles at zero.
+constexpr std::uint8_t k_trigger_mode_feedback = 0x21;
+constexpr std::uint8_t k_trigger_mode_weapon = 0x25;
+constexpr std::uint8_t k_trigger_mode_vibration = 0x26;
+
+// Effect programs address trigger travel as ten zones; the analog value is the
+// closest thing to that position a remote client provides.
+[[nodiscard]] std::uint8_t trigger_zone(const std::uint8_t value) noexcept {
+  const std::uint32_t zone = (static_cast<std::uint32_t>(value) * 10u) / 256u;
+  return static_cast<std::uint8_t>(zone > 9 ? 9 : zone);
+}
+
+struct trigger_feedback {
+  std::uint8_t feedback;  // Stop zone | status << 4.
+  std::uint8_t effect;
+};
+
+// Mirrors what a physical pad reports for a program: feedback and vibration
+// say whether the current zone is active, and a weapon goes from ready, to
+// resisting between its start and end zones, to fired once past the end zone.
+[[nodiscard]] trigger_feedback encode_trigger_feedback(
+  const ds5_trigger_effect &program,
+  const std::uint8_t value,
+  bool *const weapon_fired) noexcept {
+  const std::uint8_t zone = trigger_zone(value);
+  const std::uint16_t zones =
+    static_cast<std::uint16_t>((program.parameters[0] | (program.parameters[1] << 8)) & 0x3FF);
+  const bool zone_active = ((zones >> zone) & 1u) != 0;
+  std::uint8_t status = 0;
+  std::uint8_t effect = 0;
+
+  switch (program.mode) {
+    case k_trigger_mode_feedback:
+      effect = 1;
+      status = zone_active ? 1 : 0;
+      *weapon_fired = false;
+      break;
+    case k_trigger_mode_weapon: {
+      effect = 2;
+      if (zones == 0) {
+        *weapon_fired = false;
+        break;
+      }
+      std::uint8_t start = 0;
+      while (((zones >> start) & 1u) == 0) {
+        ++start;
+      }
+      std::uint8_t end = 9;
+      while (((zones >> end) & 1u) == 0) {
+        --end;
+      }
+      if (zone < start) {
+        *weapon_fired = false;
+      } else if (zone >= end) {
+        *weapon_fired = true;
+      }
+      status = *weapon_fired ? 2 : (zone >= start ? 1 : 0);
+      break;
+    }
+    case k_trigger_mode_vibration:
+      effect = 3;
+      status = zone_active && program.parameters[8] != 0 ? 1 : 0;
+      *weapon_fired = false;
+      break;
+    default:
+      *weapon_fired = false;
+      break;
+  }
+
+  return {static_cast<std::uint8_t>((status << 4) | zone), effect};
+}
+
 }  // namespace
 
 void ds5_state::reset() noexcept {
@@ -92,6 +165,10 @@ void ds5_state::reset() noexcept {
     contact_x[i] = 0;
     contact_y[i] = 0;
   }
+  right_trigger = {};
+  left_trigger = {};
+  right_weapon_fired = false;
+  left_weapon_fired = false;
 }
 
 const std::uint8_t *ds5_descriptor(std::size_t *const size) noexcept {
@@ -189,6 +266,12 @@ ds5_input_report encode_ds5_input(
       status |= 0x10;  // Charging.
     }
     report.status = status;
+
+    const auto right = encode_trigger_feedback(state->right_trigger, input.right_trigger, &state->right_weapon_fired);
+    const auto left = encode_trigger_feedback(state->left_trigger, input.left_trigger, &state->left_weapon_fired);
+    report.right_trigger_feedback = right.feedback;
+    report.left_trigger_feedback = left.feedback;
+    report.trigger_effects = static_cast<std::uint8_t>(right.effect | (left.effect << 4));
 
     for (std::uint8_t i = 0; i < k_ds5_touch_contacts; ++i) {
       pack_touch_point(
@@ -302,6 +385,20 @@ bool apply_ds5_battery(const battery_state_request &battery, ds5_state *const st
       static_cast<std::uint8_t>((static_cast<std::uint32_t>(battery.percent) * 10u + 50u) / 100u);
   }
   return true;
+}
+
+void apply_ds5_trigger_programs(
+  const playstation_output_feedback &feedback,
+  ds5_state *const state) noexcept {
+  if (state == nullptr || (feedback.valid & ps_output_triggers_valid) == 0) {
+    return;
+  }
+  state->right_trigger.mode = feedback.right_trigger.mode;
+  std::memcpy(state->right_trigger.parameters, feedback.right_trigger.parameters,
+              sizeof(state->right_trigger.parameters));
+  state->left_trigger.mode = feedback.left_trigger.mode;
+  std::memcpy(state->left_trigger.parameters, feedback.left_trigger.parameters,
+              sizeof(state->left_trigger.parameters));
 }
 
 bool decode_ds5_output(

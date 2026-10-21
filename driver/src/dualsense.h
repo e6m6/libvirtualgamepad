@@ -74,7 +74,16 @@ struct ds5_input_report {
   std::uint32_t sensor_timestamp;
   std::uint8_t reserved1;
   ds5_touch_point touch[k_ds5_touch_contacts];
-  std::uint8_t reserved2[12];
+  std::uint8_t reserved2;
+  // Low nibble trigger stop zone, high nibble effect status. libScePad reads
+  // these through scePadGetTriggerEffectState; games that fire on a weapon
+  // trigger's break never see a shot while they stay zero.
+  std::uint8_t right_trigger_feedback;
+  std::uint8_t left_trigger_feedback;
+  std::uint8_t reserved4[4];
+  // Low nibble right, high nibble left: 1 feedback, 2 weapon, 3 vibration.
+  std::uint8_t trigger_effects;
+  std::uint8_t reserved5[4];
   // Low nibble battery level, high nibble charging state.
   std::uint8_t status;
   std::uint8_t reserved3[10];
@@ -136,6 +145,10 @@ static_assert(offsetof(ds5_output_report, player_leds) == 44);
 static_assert(offsetof(ds5_output_report, lightbar_red) == 45);
 static_assert(offsetof(ds5_output_report, lightbar_green) == 46);
 static_assert(offsetof(ds5_output_report, lightbar_blue) == 47);
+static_assert(offsetof(ds5_input_report, right_trigger_feedback) == 42);
+static_assert(offsetof(ds5_input_report, left_trigger_feedback) == 43);
+static_assert(offsetof(ds5_input_report, trigger_effects) == 48);
+static_assert(offsetof(ds5_input_report, status) == 53);
 
 struct ds5_state {
   lvg::ds5_usb::feature_state features;
@@ -151,6 +164,13 @@ struct ds5_state {
   std::uint8_t contact_tracking_id[k_ds5_touch_contacts];
   std::uint16_t contact_x[k_ds5_touch_contacts];
   std::uint16_t contact_y[k_ds5_touch_contacts];
+  // The programs the host last wrote, so input reports can carry the trigger
+  // feedback a physical pad derives from them.
+  ds5_trigger_effect right_trigger;
+  ds5_trigger_effect left_trigger;
+  // A weapon trigger stays fired until it returns above its start zone.
+  bool right_weapon_fired;
+  bool left_weapon_fired;
 
   void reset() noexcept;
 };
@@ -164,6 +184,10 @@ struct ds5_state {
 [[nodiscard]] bool apply_ds5_touch(const touch_state_request &touch, ds5_state *state) noexcept;
 [[nodiscard]] bool apply_ds5_motion(const motion_state_request &motion, ds5_state *state) noexcept;
 [[nodiscard]] bool apply_ds5_battery(const battery_state_request &battery, ds5_state *state) noexcept;
+
+// Records the trigger programs from accumulated output feedback, so later
+// input reports describe how each trigger responds to them.
+void apply_ds5_trigger_programs(const playstation_output_feedback &feedback, ds5_state *state) noexcept;
 
 [[nodiscard]] bool decode_ds5_output(
   const ds5_output_report &output,
